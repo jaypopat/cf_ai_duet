@@ -1,10 +1,11 @@
 package ui
 
 import (
-	"fmt"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/ssh"
 )
 
 type MenuChoice int
@@ -16,40 +17,90 @@ const (
 )
 
 type MenuModel struct {
-	choice   int
-	selected MenuChoice
-	roomID   string
+	choice    int
+	selected  MenuChoice
+	roomID    string
 	inputMode bool
-	input    string
+	input     string
+	width     int
+	height    int
 }
 
 var (
+	accentColor = lipgloss.Color("#00FFB3")
+	dimColor    = lipgloss.Color("#4A4A4A")
+	textColor   = lipgloss.Color("#E0E0E0")
+	bgAccent    = lipgloss.Color("#0A0A0A")
+	borderColor = lipgloss.Color("#333333")
+
 	titleStyle = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("#7D56F4")).
-		MarginBottom(1)
+			Foreground(accentColor).
+			Bold(true)
+
+	subtitleStyle = lipgloss.NewStyle().
+			Foreground(dimColor)
+
+	dividerStyle = lipgloss.NewStyle().
+			Foreground(borderColor)
 
 	optionStyle = lipgloss.NewStyle().
-		PaddingLeft(2).
-		MarginTop(1)
+			Foreground(textColor)
 
 	selectedStyle = lipgloss.NewStyle().
-		PaddingLeft(1).
-		Foreground(lipgloss.Color("#7D56F4")).
-		Bold(true)
+			Foreground(accentColor).
+			Bold(true)
+
+	inputBoxStyle = lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder()).
+			BorderForeground(borderColor).
+			Padding(0, 1).
+			Width(30)
+
+	inputLabelStyle = lipgloss.NewStyle().
+			Foreground(textColor).
+			Bold(true)
+
+	inputTextStyle = lipgloss.NewStyle().
+			Foreground(accentColor).
+			Bold(true)
+
+	placeholderStyle = lipgloss.NewStyle().
+				Foreground(dimColor).
+				Italic(true)
+
+	cursorStyle = lipgloss.NewStyle().
+			Foreground(accentColor)
 
 	helpStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#626262")).
-		MarginTop(2)
+			Foreground(dimColor)
+
+	keyStyle = lipgloss.NewStyle().
+			Foreground(accentColor)
 )
 
 func NewMenuModel() MenuModel {
 	return MenuModel{
-		choice:   0,
-		selected: ChoiceNone,
+		choice:    0,
+		selected:  ChoiceNone,
 		inputMode: false,
-		input:    "",
+		input:     "",
 	}
+}
+
+// RunMenu wraps the Bubble Tea program for the SSH session.
+func RunMenu(session ssh.Session) (MenuModel, error) {
+	model := NewMenuModel()
+	program := tea.NewProgram(model,
+		tea.WithInput(session),
+		tea.WithOutput(session),
+		tea.WithAltScreen())
+
+	finalModel, err := program.Run()
+	if err != nil {
+		return model, err
+	}
+
+	return finalModel.(MenuModel), nil
 }
 
 func (m MenuModel) Init() tea.Cmd {
@@ -58,13 +109,21 @@ func (m MenuModel) Init() tea.Cmd {
 
 func (m MenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		return m, nil
+
 	case tea.KeyMsg:
 		if m.inputMode {
 			switch msg.String() {
 			case "enter":
-				m.roomID = m.input
-				m.selected = ChoiceJoin
-				return m, tea.Quit
+				trimmed := strings.TrimSpace(m.input)
+				if len(trimmed) > 0 {
+					m.roomID = trimmed
+					m.selected = ChoiceJoin
+					return m, tea.Quit
+				}
 			case "esc":
 				m.inputMode = false
 				m.input = ""
@@ -72,9 +131,24 @@ func (m MenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if len(m.input) > 0 {
 					m.input = m.input[:len(m.input)-1]
 				}
+			case "ctrl+u":
+				m.input = ""
 			default:
-				if len(msg.String()) == 1 {
-					m.input += msg.String()
+				chunk := msg.String()
+				if len(chunk) == 0 {
+					return m, nil
+				}
+				clean := strings.TrimSpace(strings.ToLower(chunk))
+				if clean == "" {
+					return m, nil
+				}
+				for _, r := range clean {
+					if len(m.input) >= 32 {
+						break
+					}
+					if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+						m.input += string(r)
+					}
 				}
 			}
 			return m, nil
@@ -111,32 +185,99 @@ func (m MenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m MenuModel) View() string {
-	if m.inputMode {
-		return fmt.Sprintf(
-			"%s\n\n%s\n> %s\n\n%s",
-			titleStyle.Render("🎯 Duet - SSH Pair Programming"),
-			"Enter room ID to join:",
-			m.input+"█",
-			helpStyle.Render("Press ESC to go back • ENTER to join"),
-		)
+	var b strings.Builder
+
+	width := m.width
+	if width == 0 {
+		width = 80
 	}
 
-	option1 := optionStyle.Render("1. Create new session")
-	option2 := optionStyle.Render("2. Join existing session")
+	verticalPadding := "\n\n\n\n"
+
+	if m.inputMode {
+		b.WriteString(verticalPadding)
+
+		title := titleStyle.Render("DUET")
+		b.WriteString(lipgloss.PlaceHorizontal(width, lipgloss.Center, title))
+		b.WriteString("\n")
+
+		subtitle := subtitleStyle.Render("ssh pair programming")
+		b.WriteString(lipgloss.PlaceHorizontal(width, lipgloss.Center, subtitle))
+		b.WriteString("\n\n")
+
+		divider := dividerStyle.Render("─────────────────────────")
+		b.WriteString(lipgloss.PlaceHorizontal(width, lipgloss.Center, divider))
+		b.WriteString("\n\n")
+
+		label := inputLabelStyle.Render("Room ID")
+		b.WriteString(lipgloss.PlaceHorizontal(width, lipgloss.Center, label))
+		b.WriteString("\n")
+
+		var inputContent string
+		if len(m.input) == 0 {
+			inputContent = placeholderStyle.Render("paste or type") + cursorStyle.Render(" █")
+		} else {
+			inputContent = inputTextStyle.Render(m.input) + cursorStyle.Render("█")
+		}
+
+		inputBox := inputBoxStyle.Render(inputContent)
+		b.WriteString(lipgloss.PlaceHorizontal(width, lipgloss.Center, inputBox))
+		b.WriteString("\n\n")
+
+		keys := []string{
+			keyStyle.Render("↵") + " " + helpStyle.Render("join"),
+			keyStyle.Render("esc") + " " + helpStyle.Render("back"),
+			keyStyle.Render("^U") + " " + helpStyle.Render("clear"),
+		}
+		separator := lipgloss.NewStyle().Foreground(dimColor).Render("·")
+		help := strings.Join(keys, "  "+separator+"  ")
+		b.WriteString(lipgloss.PlaceHorizontal(width, lipgloss.Center, help))
+
+		return b.String()
+	}
+
+	b.WriteString(verticalPadding)
+
+	logo := titleStyle.Render("DUET")
+	b.WriteString(lipgloss.PlaceHorizontal(width, lipgloss.Center, logo))
+	b.WriteString("\n")
+
+	tagline := subtitleStyle.Render("ssh pair programming")
+	b.WriteString(lipgloss.PlaceHorizontal(width, lipgloss.Center, tagline))
+	b.WriteString("\n\n")
+
+	// Minimal divider
+	divider := dividerStyle.Render("─────────────────────────")
+	b.WriteString(lipgloss.PlaceHorizontal(width, lipgloss.Center, divider))
+	b.WriteString("\n\n")
+
+	// Menu options - super clean
+	var option1, option2 string
 
 	if m.choice == 0 {
-		option1 = selectedStyle.Render("▸ 1. Create new session")
+		option1 = selectedStyle.Render("→ Create Session")
+		option2 = optionStyle.Render("  Join Session")
 	} else {
-		option2 = selectedStyle.Render("▸ 2. Join existing session")
+		option1 = optionStyle.Render("  Create Session")
+		option2 = selectedStyle.Render("→ Join Session")
 	}
 
-	return fmt.Sprintf(
-		"%s\n\n%s\n%s\n\n%s",
-		titleStyle.Render("🎯 Duet - SSH Pair Programming"),
-		option1,
-		option2,
-		helpStyle.Render("↑/↓ or j/k to navigate • 1/2 or ENTER to select • q to quit"),
-	)
+	b.WriteString(lipgloss.PlaceHorizontal(width, lipgloss.Center, option1))
+	b.WriteString("\n")
+	b.WriteString(lipgloss.PlaceHorizontal(width, lipgloss.Center, option2))
+	b.WriteString("\n\n")
+
+	// Minimal keybinds
+	keys := []string{
+		keyStyle.Render("↑↓") + " " + helpStyle.Render("select"),
+		keyStyle.Render("↵") + " " + helpStyle.Render("confirm"),
+		keyStyle.Render("q") + " " + helpStyle.Render("quit"),
+	}
+	separator := lipgloss.NewStyle().Foreground(dimColor).Render("·")
+	help := strings.Join(keys, "  "+separator+"  ")
+	b.WriteString(lipgloss.PlaceHorizontal(width, lipgloss.Center, help))
+
+	return b.String()
 }
 
 func (m MenuModel) GetChoice() MenuChoice {

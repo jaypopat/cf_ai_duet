@@ -1,6 +1,7 @@
 package pty
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -10,31 +11,33 @@ import (
 	"github.com/jaypopat/duet/internal/room"
 )
 
-// Handler manages PTY sessions and broadcasting
+// manages PTY sessions and broadcasting
 type Handler struct {
-	room *room.Room
-	ptmx *os.File
-	mu   sync.Mutex
+	room       *room.Room
+	ptmx       *os.File
+	mu         sync.Mutex
+	lastWriter string
 }
 
-// NewHandler creates a new PTY handler
+// creates a new PTY handler
 func NewHandler(r *room.Room) (*Handler, error) {
 	return &Handler{
 		room: r,
 	}, nil
 }
 
-// StartMaster starts the master PTY with a shell
+// starts the master PTY with a shell
 func (h *Handler) StartMaster() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	// Start a shell
-	cmd := exec.Command(os.Getenv("SHELL"))
-	if cmd.Path == "" {
-		cmd = exec.Command("/bin/bash")
-	}
+	var cmd *exec.Cmd
 
+	if shell := os.Getenv("SHELL"); shell != "" {
+		cmd = exec.Command(shell)
+	} else {
+		cmd = exec.Command("/bin/sh")
+	}
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
 		return err
@@ -46,15 +49,18 @@ func (h *Handler) StartMaster() error {
 	return nil
 }
 
-// BroadcastToClients broadcasts PTY output to all connected clients
+// broadcasts PTY output to all connected clients
 func (h *Handler) BroadcastToClients() {
-	if h.ptmx == nil {
+	h.mu.Lock()
+	ptmx := h.ptmx
+	h.mu.Unlock()
+	if ptmx == nil {
 		return
 	}
 
 	buf := make([]byte, 1024)
 	for {
-		n, err := h.ptmx.Read(buf)
+		n, err := ptmx.Read(buf)
 		if err != nil {
 			if err == io.EOF {
 				break
@@ -71,40 +77,42 @@ func (h *Handler) BroadcastToClients() {
 	}
 }
 
-// WriteFromClient writes input from a client to the master PTY
-func (h *Handler) WriteFromClient(data []byte) error {
+// writes input from a client to the master PTY
+func (h *Handler) WriteFromClient(clientID string, data []byte) error {
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	ptmx := h.ptmx
+	roomID := h.room.ID
+	shouldUpdateTitle := clientID != "" && clientID != h.lastWriter
+	if shouldUpdateTitle {
+		h.lastWriter = clientID
+	}
+	h.mu.Unlock()
 
-	if h.ptmx == nil {
+	if ptmx == nil {
 		return nil
 	}
 
-	_, err := h.ptmx.Write(data)
+	if shouldUpdateTitle {
+		for _, c := range h.room.GetClients() {
+			if c.Session != nil {
+				fmt.Fprintf(c.Session, "\033]0;Duet %s - %s typing\007", roomID, clientID)
+			}
+		}
+	}
+
+	_, err := ptmx.Write(data)
 	return err
 }
 
-// Close closes the PTY
+// closes the PTY
 func (h *Handler) Close() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	if h.ptmx != nil {
-		return h.ptmx.Close()
-	}
-	return nil
-}
-
-// Resize resizes the PTY
-func (h *Handler) Resize(rows, cols uint) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	if h.ptmx != nil {
-		return pty.Setsize(h.ptmx, &pty.Winsize{
-			Rows: uint16(rows),
-			Cols: uint16(cols),
-		})
+		err := h.ptmx.Close()
+		h.ptmx = nil
+		return err
 	}
 	return nil
 }

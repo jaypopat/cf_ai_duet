@@ -1,37 +1,36 @@
 package room
 
 import (
+	"os"
 	"sync"
 
 	"github.com/charmbracelet/ssh"
-	"github.com/creack/pty"
 )
 
-// Client represents a connected user
+// represents a connected user
 type Client struct {
 	ID      string
 	Session ssh.Session
 	IsHost  bool
 }
 
-// Room represents a pairing session
+// represents a pairing session
 type Room struct {
 	ID          string
 	Host        string
 	Connections []*Client
-	PTYSession  *pty.Pty
+	PTYSession  *os.File
+	PTYHandler  any
 	MasterPath  string
 	mu          sync.RWMutex
 }
 
-// AddClient adds a client to the room
 func (r *Room) AddClient(client *Client) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.Connections = append(r.Connections, client)
 }
 
-// RemoveClient removes a client from the room
 func (r *Room) RemoveClient(clientID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -43,7 +42,6 @@ func (r *Room) RemoveClient(clientID string) {
 	}
 }
 
-// GetClients returns all clients in the room
 func (r *Room) GetClients() []*Client {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -52,7 +50,6 @@ func (r *Room) GetClients() []*Client {
 	return clients
 }
 
-// ClientCount returns the number of clients
 func (r *Room) ClientCount() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
