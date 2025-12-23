@@ -12,6 +12,8 @@ bindings = [
 [ai]
 binding = "AI"
 
+
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["DuetAgent"]
@@ -19,6 +21,10 @@ new_sqlite_classes = ["DuetAgent"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["Sandbox"]
+
+[[containers]]
+class_name = "Sandbox"
+image = "./Dockerfile"
 
 [observability]
 [observability.logs]
