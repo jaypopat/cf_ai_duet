@@ -12,7 +12,7 @@ SSH-first pair programming tool built with Go + Charm (Bubbletea/Wish).
 ## How to access hosted version
 Connect to the app using `ssh <username>@duet.jaypopat.me`
 
-At the moment for dev reasons the code based joining isnt strictly enforced for dev reasons hence anyone can join easily without pasting in the code. This was done solely for development ease and can be turned off to allow room joins based solely by uuid shared by the room host.
+At the moment, the code based joining isnt strictly enforced for dev reasons hence anyone can join easily without pasting in the code. This was done solely for development ease and can be turned off to allow room joins based solely by uuid shared by the room host.
 
 ## How to run locally (DEV)
 Run `make dev`
