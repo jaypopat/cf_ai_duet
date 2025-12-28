@@ -9,44 +9,31 @@ import (
 
 var (
 	ErrRoomNotFound = errors.New("room not found")
-	ErrRoomExists   = errors.New("room already exists")
 )
 
 type Manager struct {
-	rooms    map[string]*Room
-	metadata map[string]*RoomMetadata // Room metadata to show in active rooms list (DEV)
-	mu       sync.RWMutex
+	rooms map[string]*Room
+	mu    sync.RWMutex
 }
 
 func NewManager() *Manager {
 	return &Manager{
-		rooms:    make(map[string]*Room),
-		metadata: make(map[string]*RoomMetadata),
+		rooms: make(map[string]*Room),
 	}
 }
 
-// CreateRoom creates a new room with a generated UUID
 func (m *Manager) CreateRoom(host, description string) (*Room, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	roomID := uuid.New().String()
-
 	room := &Room{
 		ID:          roomID,
 		Description: description,
 		Host:        host,
 		Connections: make([]*Client, 0),
 	}
-
 	m.rooms[roomID] = room
-
-	// Store metadata for display in active rooms list
-	m.metadata[roomID] = &RoomMetadata{
-		ID:          roomID,
-		Description: description,
-	}
-
 	return room, nil
 }
 func (m *Manager) GetRoom(roomID string) (*Room, error) {
@@ -67,15 +54,24 @@ func (m *Manager) RoomCount() int {
 	return len(m.rooms)
 }
 
-func (m *Manager) ListActiveRooms() []*RoomMetadata {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+func (m *Manager) LeaveRoom(roomID, clientID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-	var result []*RoomMetadata
-	for id := range m.rooms {
-		if meta, exists := m.metadata[id]; exists {
-			result = append(result, meta)
-		}
+	room, exists := m.rooms[roomID]
+	if !exists {
+		return false
 	}
-	return result
+
+	room.RemoveClient(clientID)
+
+	if room.ClientCount() == 0 {
+		if room.Terminal != nil {
+			room.Terminal.Close()
+			room.Terminal = nil
+		}
+		delete(m.rooms, roomID)
+		return true
+	}
+	return false
 }

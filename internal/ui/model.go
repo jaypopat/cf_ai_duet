@@ -2,13 +2,13 @@ package ui
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/google/uuid"
@@ -17,61 +17,47 @@ import (
 	"github.com/jaypopat/duet/internal/terminal"
 )
 
-// Minimum terminal size for 3-column layout
 const (
 	MinWidthForSidebar  = 120
 	MinHeightForSidebar = 24
 )
 
-// AIMessage represents a message in the AI conversation
-type AIMessage struct {
-	Role   string // "user" or "agent"
-	UserID string // Who sent it (for user messages)
-	Text   string
-	Ts     int64 // Timestamp
-}
+type AIMessage = room.AIMessage
 
-// this is the root application model
 type Model struct {
 	screen   Screen
 	width    int
 	height   int
 	username string
-	clientID string // Unique client ID
+	clientID string
 
-	selected    int                  // 0=create, 1=join, 2+=rejoin rooms
-	activeRooms []*room.RoomMetadata // Active rooms user can rejoin
+	selected int
+	input    textinput.Model
 
-	// create/join screen
-	input textinput.Model
+	roomID       string
+	currentRoom  *room.Room
+	terminal     *terminal.Terminal
+	termUpdateCh chan struct{}
+	termContent  string
+	users        []string
+	toasts       []toast
+	inputMode    InputMode
+	cmdInput     textinput.Model
+	typingUser   string
+	typingTime   time.Time
 
-	// room screen
-	roomID      string
-	currentRoom *room.Room
-	terminal    *terminal.Terminal
-	termContent string // rendered terminal content
-	users       []string
-	toasts      []toast         // notifications to show
-	inputMode   InputMode       // normal/AI chat/sandbox cmd
-	cmdInput    textinput.Model // AI/sandbox input
-	typingUser  string          // who is currently typing
-	typingTime  time.Time       // when they started typing
+	showAISidebar    bool
+	aiViewport       viewport.Model
+	aiLoading        bool
+	aiSpinner        spinner.Model
+	lastPromptOffset int
 
-	// AI sidebar
-	aiMessages    []AIMessage // shared AI conversation history
-	showAISidebar bool        // whether AI sidebar is visible
-	aiScrollPos   int         // scroll position in AI messages
-	aiLoading     bool        // whether waiting for AI response
-	aiSpinner     spinner.Model
-
-	// event handling ie typing/join/leave
 	eventChan chan room.RoomEvent
 
-	// Dependencies
 	roomManager *room.Manager
 	aiClient    *ai.Client
 	renderer    *lipgloss.Renderer
-	styles      *Styles // session styles (each terminal may have different colors)
+	styles      *Styles
 }
 
 type toast struct {
@@ -79,7 +65,6 @@ type toast struct {
 	expires time.Time
 }
 
-// New creates a new model
 func New(renderer *lipgloss.Renderer, roomManager *room.Manager, workerURL, username string) *Model {
 	ti := textinput.New()
 	ti.CharLimit = 100
@@ -94,10 +79,8 @@ func New(renderer *lipgloss.Renderer, roomManager *room.Manager, workerURL, user
 		aiClient = ai.NewClient(workerURL)
 	}
 
-	// create renderer specific styles
 	styles := NewStyles(renderer)
 
-	// initialize spinner with renderer styles
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 	s.Style = styles.accentStyle
@@ -105,6 +88,9 @@ func New(renderer *lipgloss.Renderer, roomManager *room.Manager, workerURL, user
 	if username == "" {
 		username = "guest"
 	}
+
+	aiVP := viewport.New(40, 20)
+	aiVP.Style = lipgloss.NewStyle()
 
 	return &Model{
 		screen:        ScreenLaunch,
@@ -117,9 +103,8 @@ func New(renderer *lipgloss.Renderer, roomManager *room.Manager, workerURL, user
 		inputMode:     ModeNormal,
 		roomManager:   roomManager,
 		aiClient:      aiClient,
-		activeRooms:   roomManager.ListActiveRooms(),
-		aiMessages:    []AIMessage{},
 		showAISidebar: true,
+		aiViewport:    aiVP,
 		aiSpinner:     s,
 		aiLoading:     false,
 		renderer:      renderer,
@@ -128,8 +113,35 @@ func New(renderer *lipgloss.Renderer, roomManager *room.Manager, workerURL, user
 }
 
 func (m *Model) Init() tea.Cmd {
-	m.activeRooms = m.roomManager.ListActiveRooms()
 	return tickCmd()
+}
+
+func (m *Model) roomLayout() (sidebarW, terminalW, aiSidebarW, mainH int) {
+	if m.showAISidebar {
+		sidebarW = m.width / 6
+		aiSidebarW = m.width / 4
+		terminalW = m.width - sidebarW - aiSidebarW - 2
+	} else {
+		sidebarW = m.width / 5
+		terminalW = m.width - sidebarW - 1
+		aiSidebarW = 0
+	}
+	mainH = m.height - 2
+	return
+}
+
+// aiViewportInnerSize returns the usable content area inside the AI sidebar.
+// we account for: border (1), padding (1 each side), header lines (3).
+func (m *Model) aiViewportInnerSize(aiW, mainH int) (w, h int) {
+	w = aiW - 4
+	h = mainH - 6
+	if w < 10 {
+		w = 10
+	}
+	if h < 5 {
+		h = 5
+	}
+	return
 }
 
 func tickCmd() tea.Cmd {
@@ -143,12 +155,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.cmdInput.Width = m.width - 10
+		m.cmdInput.Width = m.width - 16
+
+		_, terminalW, aiSidebarW, mainH := m.roomLayout()
 
 		if m.terminal != nil {
-			termW := m.width * 4 / 5
-			termH := m.height - 6
-			m.terminal.Resize(termW, termH)
+			m.terminal.Resize(terminalW, mainH-4)
+		}
+
+		if m.showAISidebar && aiSidebarW > 0 {
+			vpW, vpH := m.aiViewportInnerSize(aiSidebarW, mainH)
+			m.aiViewport.Width = vpW
+			m.aiViewport.Height = vpH
 		}
 		return m, nil
 
@@ -156,7 +174,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 
 	case spinner.TickMsg:
-		//spinner tick for AI loading animation
 		if m.aiLoading {
 			var cmd tea.Cmd
 			m.aiSpinner, cmd = m.aiSpinner.Update(msg)
@@ -165,25 +182,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		m.expireToasts()
-		// clear typing indicator after 2 seconds of no activity
 		if m.typingUser != "" && time.Since(m.typingTime) > 2*time.Second {
 			m.typingUser = ""
 		}
 		return m, tickCmd()
 
 	case terminalUpdateMsg:
-		// terminal content changed - render and listen for next update
 		if m.terminal != nil {
 			m.termContent = m.terminal.Render()
 		}
 		return m, m.waitForTerminalUpdate()
 
 	case roomEventMsg:
-		// Handle room event from channel
 		switch msg.Event.Type {
 		case "join":
 			m.users = append(m.users, msg.Event.Username)
-			// only show join toast for other users, not for yourself
 			if msg.Event.Username != m.username {
 				m.addToast(fmt.Sprintf("%s joined", msg.Event.Username))
 			}
@@ -193,9 +206,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "typing":
 			m.typingUser = msg.Event.Username
 			m.typingTime = time.Now()
-		case "ai_messages":
-			// Received AI conversation update from another user
-			m.parseAIMessagesFromEvent(msg.Event.Data)
+		case "ai_sync":
+			// Another client updated AI messages - refresh viewport from shared Room
+			m.syncAIViewportContent()
+			m.scrollToLastPrompt()
 		}
 		return m, m.listenForRoomEvents()
 
@@ -215,6 +229,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.screen = ScreenRoom
 		m.users = m.getUserList()
 
+		// Sync AI viewport with existing room messages (history for late joiners)
+		m.syncAIViewportContent()
+		m.aiViewport.GotoBottom() // For history, show the most recent
+
 		// start terminal and event listening
 		return m, tea.Batch(
 			m.startTerminal(),
@@ -231,15 +249,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case AIResponseMsg:
-		m.aiMessages = convertChatMessages(msg.Messages)
-		// auto-scroll to bottom
-		m.aiScrollPos = len(m.aiMessages)
-		// stop loading
-		m.aiLoading = false
-		// broadcast to other users in the room
 		if m.currentRoom != nil {
-			m.broadcastAIMessages()
+			m.currentRoom.SetAIMessages(msg.Messages)
+			// Notify other clients to sync their viewport
+			m.currentRoom.BroadcastEvent(room.RoomEvent{
+				Type: "ai_sync",
+			}, m.clientID)
 		}
+		m.syncAIViewportContent()
+		m.scrollToLastPrompt()
+
+		m.aiLoading = false
 		return m, nil
 
 	case SandboxResultMsg:
@@ -271,7 +291,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
-	// Ctrl+C only quits from launch screen, in rooms it's forwarded to terminal
 	if key == "ctrl+c" && m.screen != ScreenRoom {
 		m.cleanup()
 		return m, tea.Quit
@@ -279,14 +298,13 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch m.screen {
 	case ScreenLaunch:
-		maxSelection := 1 + len(m.activeRooms) // 0 = create, 1 = join, 2+ =  joinable rooms
 		switch key {
 		case "up", "k":
 			if m.selected > 0 {
 				m.selected--
 			}
 		case "down", "j":
-			if m.selected < maxSelection {
+			if m.selected < 1 {
 				m.selected++
 			}
 		case "c", "C":
@@ -294,19 +312,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "J":
 			return m, gotoScreen(ScreenJoin)
 		case "enter":
-			switch m.selected {
-			case 0:
+			if m.selected == 0 {
 				return m, gotoScreen(ScreenCreate)
-			case 1:
-				return m, gotoScreen(ScreenJoin)
-			default:
-				// Rejoin selected room
-				roomIdx := m.selected - 2
-				if roomIdx >= 0 && roomIdx < len(m.activeRooms) {
-					roomMeta := m.activeRooms[roomIdx]
-					return m, m.rejoinRoom(roomMeta.ID)
-				}
 			}
+			return m, gotoScreen(ScreenJoin)
 		case "q", "esc":
 			return m, tea.Quit
 		}
@@ -339,8 +348,6 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch key {
 		case "enter":
 			m.screen = ScreenRoom
-			m.addToast("Entered room")
-			// Start terminal and event listening
 			return m, tea.Batch(
 				m.startTerminal(),
 				m.listenForRoomEvents(),
@@ -358,7 +365,6 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) handleRoomKey(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// handle input modes first
 	if m.inputMode != ModeNormal {
 		switch key {
 		case "enter":
@@ -374,7 +380,6 @@ func (m *Model) handleRoomKey(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// check for mode switches
 	switch key {
 	case "ctrl+g":
 		if m.aiClient == nil {
@@ -397,17 +402,23 @@ func (m *Model) handleRoomKey(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cmdInput.Focus()
 		return m, textinput.Blink
 	case "ctrl+a":
-		// toggle AI sidebar
 		m.showAISidebar = !m.showAISidebar
 		return m, nil
+	case "ctrl+j":
+		if m.showAISidebar {
+			m.aiViewport.ScrollDown(3)
+		}
+		return m, nil
+	case "ctrl+k":
+		if m.showAISidebar {
+			m.aiViewport.ScrollUp(3)
+		}
+		return m, nil
 	case "ctrl+l":
-		// leave room
 		m.cleanup()
-		m.activeRooms = m.roomManager.ListActiveRooms()
 		return m, gotoScreen(ScreenLaunch)
 	}
 
-	// forward all other keys to terminal
 	if m.terminal != nil {
 		var data []byte
 		switch key {
@@ -574,18 +585,6 @@ func (m *Model) joinRoom() tea.Msg {
 	return RoomJoinedMsg{RoomID: id, Room: r}
 }
 
-func (m *Model) rejoinRoom(roomID string) tea.Cmd {
-	return func() tea.Msg {
-		r, err := m.roomManager.GetRoom(roomID)
-		if err != nil {
-			return ErrorMsg{err}
-		}
-		m.registerAsClient(r, false)
-
-		return RoomJoinedMsg{RoomID: roomID, Room: r}
-	}
-}
-
 func (m *Model) registerAsClient(r *room.Room, isHost bool) {
 	m.eventChan = make(chan room.RoomEvent, 10)
 
@@ -619,15 +618,13 @@ func (m *Model) getUserList() []string {
 }
 
 func (m *Model) cleanup() {
-	if m.currentRoom != nil {
-		m.currentRoom.RemoveClient(m.clientID)
+	if m.terminal != nil && m.termUpdateCh != nil {
+		m.terminal.Unsubscribe(m.termUpdateCh)
+		m.termUpdateCh = nil
+	}
 
-		// only close terminal if we're the last client
-		if m.currentRoom.ClientCount() == 0 && m.terminal != nil {
-			m.terminal.Close()
-			m.currentRoom.Terminal = nil
-		}
-
+	if m.currentRoom != nil && m.roomID != "" {
+		m.roomManager.LeaveRoom(m.roomID, m.clientID)
 		m.currentRoom = nil
 	}
 
@@ -641,21 +638,22 @@ func (m *Model) startTerminal() tea.Cmd {
 	return func() tea.Msg {
 		if m.currentRoom != nil && m.currentRoom.Terminal != nil {
 			m.terminal = m.currentRoom.Terminal
+			m.termUpdateCh = m.terminal.Subscribe()
 			m.termContent = m.terminal.Render()
 			return terminalUpdateMsg{} // start listening for updates
 		}
 
-		// Calculate terminal size
-		termW := m.width * 4 / 5
-		termH := m.height - 6
-		if termW < 40 {
-			termW = 80
+		_, terminalW, _, mainH := m.roomLayout()
+		termH := mainH - 4 // account for header and padding
+
+		if terminalW < 40 {
+			terminalW = 80
 		}
 		if termH < 10 {
 			termH = 24
 		}
 
-		m.terminal = terminal.New(termW, termH)
+		m.terminal = terminal.New(terminalW, termH)
 
 		if err := m.terminal.Start(); err != nil {
 			return ErrorMsg{err}
@@ -665,18 +663,20 @@ func (m *Model) startTerminal() tea.Cmd {
 			m.currentRoom.Terminal = m.terminal
 		}
 
+		// Subscribe to terminal updates (per-client channel)
+		m.termUpdateCh = m.terminal.Subscribe()
 		m.termContent = m.terminal.Render()
 		return terminalUpdateMsg{} // start listening for updates
 	}
 }
 
-// we listens for terminal updates via channel
+// listens for terminal updates via per-client subscription
 func (m *Model) waitForTerminalUpdate() tea.Cmd {
-	if m.terminal == nil || m.terminal.Updates == nil {
+	if m.terminal == nil || m.termUpdateCh == nil {
 		return nil
 	}
 	return func() tea.Msg {
-		_, ok := <-m.terminal.Updates
+		_, ok := <-m.termUpdateCh
 		if !ok {
 			return nil // Channel closed
 		}
@@ -759,44 +759,24 @@ func truncate(s string, max int) string {
 	return s[:max]
 }
 
-// AI sidebar helpers
+// some helpers for the ai sidebar
 
-func convertChatMessages(msgs []AIMessage) []AIMessage {
-	return msgs
+// rebuilds the viewport content from Room's AI messages.
+func (m *Model) syncAIViewportContent() {
+	content, promptOffset := m.buildAIContent(m.aiViewport.Width)
+	m.aiViewport.SetContent(content)
+	m.lastPromptOffset = promptOffset
 }
 
-func (m *Model) broadcastAIMessages() {
+// scrolls the AI viewport to show the last user prompt
+func (m *Model) scrollToLastPrompt() {
+	m.aiViewport.SetYOffset(m.lastPromptOffset)
+}
+
+// returns AI messages from the current room, or empty slice if no room.
+func (m *Model) getAIMessages() []AIMessage {
 	if m.currentRoom == nil {
-		return
+		return nil
 	}
-	// Serialize messages as JSON for transport
-	data, err := m.serializeAIMessages()
-	if err != nil {
-		return
-	}
-	m.currentRoom.BroadcastEvent(room.RoomEvent{
-		Type:     "ai_messages",
-		Username: m.username,
-		Data:     data,
-	}, m.clientID)
-}
-
-func (m *Model) serializeAIMessages() (string, error) {
-	data, err := json.Marshal(m.aiMessages)
-	if err != nil {
-		return "", err
-	}
-	return string(data), nil
-}
-
-func (m *Model) parseAIMessagesFromEvent(data string) {
-	if data == "" {
-		return
-	}
-	var msgs []AIMessage
-	if err := json.Unmarshal([]byte(data), &msgs); err != nil {
-		return
-	}
-	m.aiMessages = msgs
-	m.aiScrollPos = len(m.aiMessages)
+	return m.currentRoom.GetAIMessages()
 }

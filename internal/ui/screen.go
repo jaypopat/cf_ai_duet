@@ -2,7 +2,7 @@ package ui
 
 import "github.com/jaypopat/duet/internal/room"
 
-// Screen represents which screen is currently active
+// represents which screen is currently active
 type Screen int
 
 const (
@@ -13,7 +13,7 @@ const (
 	ScreenRoom
 )
 
-// InputMode represents the input mode in the room screen
+// represents the input mode in the room screen
 type InputMode int
 
 const (
@@ -53,10 +53,6 @@ type ErrorMsg struct {
 type AIResponseMsg struct {
 	Reply    string
 	Messages []AIMessage // Full conversation history from server
-}
-
-type AIMessagesMsg struct {
-	Messages []AIMessage // AI messages received from another user
 }
 
 type SandboxResultMsg struct {

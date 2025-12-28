@@ -8,41 +8,39 @@ import (
 
 // RoomEvent represents an event that occurred in a room
 type RoomEvent struct {
-	Type     string // "join", "leave", "typing"
+	Type     string
 	Username string
 	Data     string
 }
 
-// represents a connected user
+type AIMessage struct {
+	Role   string `json:"role"`
+	UserID string `json:"user_id"`
+	Text   string `json:"text"`
+	Ts     int64  `json:"ts"`
+}
+
 type Client struct {
 	ID       string
 	Username string
 	IsHost   bool
-	Events   chan RoomEvent // Channel to receive room events
+	Events   chan RoomEvent
 }
 
-// represents a pairing session
 type Room struct {
 	ID          string
 	Description string
 	Host        string
 	Connections []*Client
 	mu          sync.RWMutex
-
-	// Shared terminal - using v10x for this
-	Terminal *terminal.Terminal
-}
-
-type RoomMetadata struct {
-	ID          string // uuid
-	Description string // user provides description on room creation
+	Terminal    *terminal.Terminal
+	AIMessages  []AIMessage
 }
 
 func (r *Room) AddClient(client *Client) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// remove existing client with same ID if present (to handle reconnections)
 	for i, c := range r.Connections {
 		if c.ID == client.ID {
 			if c.Events != nil {
@@ -55,13 +53,11 @@ func (r *Room) AddClient(client *Client) {
 
 	r.Connections = append(r.Connections, client)
 
-	// Notify all other clients
 	for _, c := range r.Connections {
 		if c.ID != client.ID && c.Events != nil {
 			select {
 			case c.Events <- RoomEvent{Type: "join", Username: client.Username}:
 			default:
-				// when we push more events than the channel buffer can hold, we drop events to avoid blocking
 			}
 		}
 	}
@@ -75,7 +71,6 @@ func (r *Room) RemoveClient(clientID string) {
 	for i, c := range r.Connections {
 		if c.ID == clientID {
 			removedUsername = c.Username
-			// Close the events channel
 			if c.Events != nil {
 				close(c.Events)
 			}
@@ -84,7 +79,6 @@ func (r *Room) RemoveClient(clientID string) {
 		}
 	}
 
-	// Notify remaining clients
 	if removedUsername != "" {
 		for _, c := range r.Connections {
 			if c.Events != nil {
@@ -97,7 +91,6 @@ func (r *Room) RemoveClient(clientID string) {
 	}
 }
 
-// BroadcastEvent sends an event to all clients in the room (Generic implementation)
 func (r *Room) BroadcastEvent(event RoomEvent, excludeClientID string) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -107,7 +100,6 @@ func (r *Room) BroadcastEvent(event RoomEvent, excludeClientID string) {
 			select {
 			case c.Events <- event:
 			default:
-				// when we push more events than the channel buffer can hold, we drop events to avoid blocking
 			}
 		}
 	}
@@ -131,4 +123,18 @@ func (r *Room) ClientCount() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return len(r.Connections)
+}
+
+func (r *Room) SetAIMessages(msgs []AIMessage) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.AIMessages = msgs
+}
+
+func (r *Room) GetAIMessages() []AIMessage {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	result := make([]AIMessage, len(r.AIMessages))
+	copy(result, r.AIMessages)
+	return result
 }

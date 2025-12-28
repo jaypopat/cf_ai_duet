@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/reflow/wordwrap"
 )
 
 func (m *Model) viewLaunch() string {
@@ -13,42 +14,17 @@ func (m *Model) viewLaunch() string {
 	createBtn := m.styles.buttonStyle.Render("Create Room  (c)")
 	joinBtn := m.styles.buttonStyle.Render("Join Room    (J)")
 
-	switch m.selected {
-	case 0:
+	if m.selected == 0 {
 		createBtn = m.styles.buttonActive.Render("Create Room  (c)")
-	case 1:
+	} else {
 		joinBtn = m.styles.buttonActive.Render("Join Room    (J)")
 	}
 
 	buttons := lipgloss.JoinVertical(lipgloss.Center, createBtn, joinBtn)
-
-	// Show active rooms if any
-	if len(m.activeRooms) > 0 {
-		roomsHeader := m.styles.dimStyle.Render("\n─── Active Rooms ───\n")
-		var roomButtons []string
-		for i, meta := range m.activeRooms {
-			desc := meta.Description
-			if desc == "" {
-				desc = "No description"
-			}
-			label := fmt.Sprintf("%.8s: %s", meta.ID, truncate(desc, 20))
-			if m.selected == i+2 {
-				roomButtons = append(roomButtons, m.styles.buttonActive.Render(label))
-			} else {
-				roomButtons = append(roomButtons, m.styles.buttonStyle.Render(label))
-			}
-		}
-		roomsList := lipgloss.JoinVertical(lipgloss.Center, roomButtons...)
-		buttons = lipgloss.JoinVertical(lipgloss.Center, buttons, roomsHeader, roomsList)
-	}
-
 	help := m.styles.helpStyle.Render("↑/↓ select • enter confirm • q quit")
-
 	content := lipgloss.JoinVertical(lipgloss.Center, logo, buttons, help)
 
-	view := lipgloss.Place(m.width, m.height-1, lipgloss.Center, lipgloss.Center, content)
-
-	return view
+	return lipgloss.Place(m.width, m.height-1, lipgloss.Center, lipgloss.Center, content)
 }
 
 func (m *Model) viewCreate() string {
@@ -72,8 +48,14 @@ func (m *Model) viewJoin() string {
 	input := m.styles.inputBoxStyle.Render(m.input.View())
 	help := m.styles.helpStyle.Render("enter join • esc back")
 
+	// if room doesnt exist we show the toast
+	var errorLine string
+	if len(m.toasts) > 0 {
+		errorLine = m.styles.errorStyle.Render("▸ " + m.toasts[len(m.toasts)-1].text)
+	}
+
 	content := lipgloss.JoinVertical(lipgloss.Center,
-		title, "", prompt, "", input, help,
+		title, "", prompt, "", input, "", errorLine, help,
 	)
 
 	view := lipgloss.Place(m.width, m.height-1, lipgloss.Center, lipgloss.Center, content)
@@ -84,7 +66,7 @@ func (m *Model) viewJoin() string {
 func (m *Model) viewRoomCreated() string {
 	title := m.styles.titleStyle.Render("Room Created!")
 
-	// Room code box - prominent display for easy copying
+	// Room code box - for easy copying
 	codeLabel := m.styles.dimStyle.Render("Share this code with others to join:")
 	codeBox := m.styles.baseStyle.
 		Border(lipgloss.RoundedBorder()).
@@ -109,20 +91,7 @@ func (m *Model) viewRoom() string {
 		return m.viewResizePrompt()
 	}
 
-	// calculates widths based on sidebar visibility
-	var sidebarW, terminalW, aiSidebarW int
-	if m.showAISidebar {
-		sidebarW = m.width / 6   // Users sidebar (narrower)
-		aiSidebarW = m.width / 4 // AI sidebar
-		terminalW = m.width - sidebarW - aiSidebarW - 2
-	} else {
-		sidebarW = m.width / 5
-		terminalW = m.width - sidebarW - 1
-		aiSidebarW = 0
-	}
-
-	// Always reserve same height for consistent bottom bar (never changes)
-	mainHeight := m.height - 2
+	sidebarW, terminalW, aiSidebarW, mainHeight := m.roomLayout()
 
 	sidebar := m.renderSidebar(sidebarW, mainHeight)
 	terminal := m.renderTerminal(terminalW, mainHeight)
@@ -183,6 +152,7 @@ func (m *Model) renderSidebar(w, h int) string {
 	b.WriteString(keysLabel + "\n")
 	b.WriteString(m.styles.textStyle.Render("  ctrl+g  AI prompt") + "\n")
 	b.WriteString(m.styles.textStyle.Render("  ctrl+a  toggle AI") + "\n")
+	b.WriteString(m.styles.textStyle.Render("  ctrl+j/k scroll AI") + "\n")
 	b.WriteString(m.styles.textStyle.Render("  ctrl+r  run command") + "\n")
 	b.WriteString(m.styles.textStyle.Render("  ctrl+l  leave room") + "\n")
 
@@ -191,8 +161,6 @@ func (m *Model) renderSidebar(w, h int) string {
 
 func (m *Model) renderTerminal(w, h int) string {
 	header := m.styles.titleStyle.Render("shared terminal")
-
-	// Use rendered terminal content instead of viewport
 	content := m.termContent
 	if content == "" {
 		content = m.styles.dimStyle.Render("Starting terminal...")
@@ -204,12 +172,12 @@ func (m *Model) renderTerminal(w, h int) string {
 }
 
 func (m *Model) renderBottomBar() string {
-	// 1. Right side: Mode status (always visible)
+	// Right side: Mode status (always visible) similar to vim mode indicator
 	modeText := m.getModeStatus()
 	right := m.styles.accentStyle.Bold(true).Render(modeText)
 	rightWidth := lipgloss.Width(right)
 
-	// 2. Left side: Priority: Toasts > Input > Help
+	//  Priority: Toasts > Input > Help
 	var left string
 	if len(m.toasts) > 0 {
 		var parts []string
@@ -219,11 +187,8 @@ func (m *Model) renderBottomBar() string {
 		toastText := "▸ " + strings.Join(parts, " • ")
 		left = m.styles.accentStyle.Bold(true).Render(truncate(toastText, m.width-rightWidth-2))
 	} else if m.inputMode != ModeNormal {
-		// Active input mode (AI or Sandbox)
-		inputView := m.cmdInput.View()
-		left = truncate(inputView, m.width-rightWidth-2)
+		left = m.cmdInput.View()
 	} else {
-		// Normal mode help text
 		helpText := "ctrl+g AI • ctrl+a toggle AI • ctrl+r sandbox"
 		left = m.styles.dimStyle.Render(truncate(helpText, m.width-rightWidth-2))
 	}
@@ -264,119 +229,92 @@ func (m *Model) viewResizePrompt() string {
 func (m *Model) renderAISidebar(w, h int) string {
 	var b strings.Builder
 
-	// Header
 	header := m.styles.titleStyle.Render("AI Assistant")
 	b.WriteString(header + "\n")
-	b.WriteString(m.styles.dimStyle.Render("─────────────────────") + "\n\n")
+	b.WriteString(m.styles.dimStyle.Render(strings.Repeat("─", w-4)) + "\n\n")
 
-	// calculate available height for messages
-	msgHeight := h - 6
-
-	// show loading spinner if waiting for response
 	if m.aiLoading {
 		loadingText := fmt.Sprintf("%s Thinking...", m.aiSpinner.View())
-		b.WriteString(m.styles.accentStyle.Render(loadingText))
-	} else if len(m.aiMessages) == 0 {
-		// Empty state
+		b.WriteString(m.styles.accentStyle.Render(loadingText) + "\n\n")
+		b.WriteString(m.aiViewport.View())
+	} else if len(m.getAIMessages()) == 0 {
 		emptyMsg := m.styles.dimStyle.Render("No messages yet.\nPress ctrl+g to ask AI.")
 		b.WriteString(emptyMsg)
 	} else {
-		// Render messages, showing most recent that fit
-		messages := m.formatAIMessages(w-4, msgHeight)
-		b.WriteString(messages)
+		b.WriteString(m.aiViewport.View())
+	}
+
+	// Scroll indicator (0 -100)
+	if len(m.getAIMessages()) > 0 {
+		scrollInfo := fmt.Sprintf(" %.0f%% ", m.aiViewport.ScrollPercent()*100)
+		b.WriteString("\n" + m.styles.dimStyle.Render(scrollInfo))
 	}
 
 	return m.styles.aiSidebarStyle.Width(w).Height(h).Render(b.String())
 }
 
-func (m *Model) formatAIMessages(maxWidth, maxLines int) string {
-	var lines []string
+// formatting content for viewport with proper line tracking
+func (m *Model) buildAIContent(maxWidth int) (string, int) {
+	if maxWidth <= 0 {
+		maxWidth = 40
+	}
 
-	for _, msg := range m.aiMessages {
-		var prefix, style string
+	var b strings.Builder
+	wrapWidth := maxWidth - 4 // account for indent
+
+	msgs := m.getAIMessages()
+	currentLine := 0
+	lastPromptOffset := 0
+
+	for i, msg := range msgs {
+		var prefix string
+		var isUser bool
+
 		if msg.Role == "user" {
-			// Show username for user messages
 			username := msg.UserID
 			if username == "" {
 				username = "you"
 			}
 			prefix = m.styles.accentStyle.Render(username + ": ")
-			style = "user"
+			isUser = true
+			// Track the line offset where this user prompt starts
+			lastPromptOffset = currentLine
 		} else {
 			prefix = m.styles.dimStyle.Render("AI: ")
-			style = "agent"
+			isUser = false
 		}
 
-		// Word wrap the message text
-		wrapped := m.wrapText(msg.Text, maxWidth-4)
-		wrappedLines := strings.Split(wrapped, "\n")
+		// Word wrap the message text using reflow
+		wrapped := wordwrap.String(msg.Text, wrapWidth)
+		lines := strings.Split(wrapped, "\n")
 
-		for i, line := range wrappedLines {
-			if i == 0 {
-				if style == "user" {
-					lines = append(lines, prefix+m.styles.accentStyle.Render(line))
+		for j, line := range lines {
+			if j == 0 {
+				// First line includes prefix
+				if isUser {
+					b.WriteString(prefix + m.styles.accentStyle.Render(line))
 				} else {
-					lines = append(lines, prefix+m.styles.textStyle.Render(line))
+					b.WriteString(prefix + m.styles.textStyle.Render(line))
 				}
 			} else {
 				// Continuation lines - indent to align with text
 				indent := "    "
-				if style == "user" {
-					lines = append(lines, indent+m.styles.accentStyle.Render(line))
+				if isUser {
+					b.WriteString(indent + m.styles.accentStyle.Render(line))
 				} else {
-					lines = append(lines, indent+m.styles.textStyle.Render(line))
+					b.WriteString(indent + m.styles.textStyle.Render(line))
 				}
 			}
-		}
-		lines = append(lines, "") // Blank line between messages
-	}
-
-	// Show only the last N lines that fit
-	if len(lines) > maxLines {
-		lines = lines[len(lines)-maxLines:]
-	}
-
-	return strings.Join(lines, "\n")
-}
-
-func (m *Model) wrapText(text string, width int) string {
-	if width <= 0 {
-		width = 40
-	}
-
-	var result strings.Builder
-	words := strings.Fields(text)
-	lineLen := 0
-
-	for i, word := range words {
-		wordLen := len(word)
-
-		if lineLen+wordLen+1 > width && lineLen > 0 {
-			result.WriteString("\n")
-			lineLen = 0
+			b.WriteString("\n")
+			currentLine++
 		}
 
-		if lineLen > 0 {
-			result.WriteString(" ")
-			lineLen++
-		}
-
-		result.WriteString(word)
-		lineLen += wordLen
-
-		// Handle newlines in original text
-		if i < len(words)-1 && strings.Contains(text, "\n") {
-			// Check if there was a newline between this word and next
-			idx := strings.Index(text, word)
-			if idx >= 0 {
-				afterWord := text[idx+len(word):]
-				if len(afterWord) > 0 && afterWord[0] == '\n' {
-					result.WriteString("\n")
-					lineLen = 0
-				}
-			}
+		// Blank line between messages (except after last)
+		if i < len(msgs)-1 {
+			b.WriteString("\n")
+			currentLine++
 		}
 	}
 
-	return result.String()
+	return b.String(), lastPromptOffset
 }

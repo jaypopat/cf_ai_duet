@@ -8,11 +8,10 @@ SSH-first pair programming tool built with Go + Charm (Bubbletea/Wish).
 - Shared live terminal
 - AI Agent and access to sandbox (cloudflare stack)
 - Users can directly run commands on sandbox or let AI run commands through chat (some usecases include cloning a repo and operating file operations)
+- Usecases include teaching, interviews, and collaborative coding
 
 ## How to access hosted version
 Connect to the app using `ssh <username>@duet.jaypopat.me`
-
-At the moment, the code based joining isnt strictly enforced for dev reasons hence anyone can join easily without pasting in the code. This was done solely for development ease and can be turned off to allow room joins based solely by uuid shared by the room host.
 
 ## How to run locally (DEV)
 Run `make dev`

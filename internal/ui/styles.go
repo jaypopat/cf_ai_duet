@@ -7,7 +7,6 @@ const (
 	colorDim     = lipgloss.Color("8") // Bright black/gray (ANSI 8)
 	colorText    = lipgloss.Color("7") // White (ANSI 7)
 	colorBorder  = lipgloss.Color("8") // Bright black/gray (ANSI 8)
-	colorToast   = lipgloss.Color("3") // Yellow (ANSI 3)
 	colorError   = lipgloss.Color("1") // Red (ANSI 1)
 	colorSuccess = lipgloss.Color("2") // Green (ANSI 2)
 )
@@ -98,7 +97,7 @@ func NewStyles(renderer *lipgloss.Renderer) *Styles {
 			BorderStyle(lipgloss.NormalBorder()).
 			BorderTop(true).
 			BorderForeground(colorBorder).
-			PaddingTop(1).
+			PaddingTop(0).
 			Height(1),
 	}
 }
