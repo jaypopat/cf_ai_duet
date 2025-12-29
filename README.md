@@ -20,6 +20,12 @@ This will spin up the cloudflare worker locally (except the ai inference - happe
 
 Connect to this using the command `ssh <username>@localhost -p 2222`
 
+## CF Stack used
+- Cloudflare Workers
+- Cloudflare LLM (Llama)
+- Cloudflare Durable Object (per room LLM Context/memory)
+- Cloudflare Sandboxes - worker can exec commands (optionally using the ai response)
+
 ---
 
 Inspired by terminal.shop, I wanted to build SSH UIs. I’ve also been wanting to learn Go for a while, so I decided to build this project over a weekend to both learn Go and build something useful.
